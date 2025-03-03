@@ -55,33 +55,34 @@ trade_type = st.selectbox("Trade Type:", ["Import", "Export"])
 
 # Function to merge HS code data
 def merge_hs_code_data(hs_code_selection, trade_type):
-    merged_data = {}
+    merged_data = []
     country_data = {}
 
     for hs_code in hs_code_selection:
         file_path = f"{hs_code}_{trade_type}.csv"
         if os.path.exists(file_path):
-            df = pd.read_csv(file_path, index_col=0)
-            st.write(f"Loaded data for {hs_code}:", df.head())  # Debugging output
+            df = pd.read_csv(file_path)
+            df = df.set_index("Country")
+            merged_data.append(df)
             for year in df.columns:
-                if "Total" in df.index:
-                    merged_data[year] = merged_data.get(year, 0) + df.at["Total", year]
+                if year not in country_data:
+                    country_data[year] = {}
                 for country, value in df[year].items():
-                    if country != "Total":
-                        if year not in country_data:
-                            country_data[year] = {}
-                        country_data[year][country] = country_data[year].get(country, 0) + value
+                    country_data[year][country] = country_data[year].get(country, 0) + value
 
-    combined_df = pd.DataFrame({"Fiscal Year": list(merged_data.keys()), "Total Trade Value": list(merged_data.values())})
-    combined_df.sort_values("Fiscal Year", inplace=True)
-    st.write("Combined data:", combined_df.head())  # Debugging output
+    if merged_data:
+        combined_df = pd.concat(merged_data).groupby(level=0).sum()
+        combined_df = combined_df.reset_index()
+        st.write("Combined data:", combined_df.head())
+    else:
+        combined_df = pd.DataFrame()
 
     csv_path = "/tmp/combined_countrywise_trade.csv"
     if country_data:
         countrywise_df = pd.DataFrame.from_dict(country_data, orient="index").fillna(0)
         countrywise_df.index.name = "Fiscal Year"
         countrywise_df.to_csv(csv_path)
-        st.write(f"Country-wise data saved at {csv_path}")  # Debugging output
+        st.write(f"Country-wise data saved at {csv_path}")
 
     return combined_df, csv_path if country_data else None
 
@@ -111,7 +112,7 @@ if st.button("Fetch Trade Data"):
 
         combined_df, countrywise_csv_path = merge_hs_code_data(hs_code_selection, trade_type)
 
-        if combined_df is not None:
+        if not combined_df.empty:
             st.subheader(f"Trend in {trade_type}s for HS Codes {hs_numbers} during the period {start_fiscal_year} to {end_fiscal_year}")
             fig = px.line(combined_df, x="Fiscal Year", y="Total Trade Value", markers=True)
             fig.update_layout(xaxis_title="Fiscal Year", yaxis_title="Total Trade Value (US$ Million)")
