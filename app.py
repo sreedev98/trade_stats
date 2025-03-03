@@ -10,14 +10,19 @@ from scraper import scrape_hs_code
 
 st.set_page_config(page_title="Trade Stats Scraper", page_icon=None)
 
+
 def to_fiscal_year(year):
     return f"{year}-{str(year + 1)[-2:]}"
+
 
 def from_fiscal_year(fiscal_year):
     return int(fiscal_year.split("-")[0])
 
+
 fiscal_years = [to_fiscal_year(y) for y in range(1997, 2025)]
+
 sourceurl = "https://tradestat.commerce.gov.in/"
+
 
 @st.cache_data
 def load_hscode_data():
@@ -28,15 +33,16 @@ def load_hscode_data():
         st.error(f"Error loading HS code data: {e}")
         return pd.DataFrame()
 
+
 hscodes_df = load_hscode_data()
 my_url = "https://sreedev98.github.io/"
 st.title("India Trade Stats Scraper")
 st.markdown("_By [Sreedev Krishnakumar](%s)_" % my_url)
 st.markdown("This was built to make it easier to scrape HS code wise data of India's trade with other countries over a "
-            "larger period of time (which is a cumbersome process in the [Trade Stats portal](%s)). Simply choose the HS "
-            "code(s) you want the data for, the years, and the type of trade (import/export) and the program will generate "
-            "CSVs that you can download for each HS code with country-wise data, as well as an additional CSV with combined "
-            "totals of the selected HS codes, in case there are multiple selected." % sourceurl)
+        "larger period of time (which is a cumbersome process in the [Trade Stats portal](%s)). Simply choose the HS "
+        "code(s) you want the data for, the years, and the type of trade (import/export) and the program will generate "
+        "CSVs that you can download for each HS code with country-wise data, as well as an additional CSV with combined "
+        "totals of the selected HS codes, in case there are multiple selected." % sourceurl)
 
 hs_code_selection = st.multiselect("Select HS Code(s):", options=hscodes_df["HSN_CD"].astype(str).tolist(), default=[])
 hs_numbers = ','.join(hs_code_selection)
@@ -53,22 +59,34 @@ end_year = from_fiscal_year(end_fiscal_year)
 
 trade_type = st.selectbox("Trade Type:", ["Import", "Export"])
 
+
 def merge_hs_code_data(hs_code_selection, trade_type):
-    merged_data = []
+    merged_data = {}
+    country_data = {}
+
     for hs_code in hs_code_selection:
         file_path = f"{hs_code}_{trade_type}.csv"
         if os.path.exists(file_path):
-            df = pd.read_csv(file_path)
-            df["HS Code"] = hs_code
-            merged_data.append(df)
-    
-    if merged_data:
-        combined_df = pd.concat(merged_data, ignore_index=True)
-        combined_df = combined_df.groupby(["Fiscal Year"]).sum().reset_index()
-    else:
-        combined_df = pd.DataFrame()
-    
-    return combined_df
+            df = pd.read_csv(file_path, index_col=0)
+            for year in df.columns:
+                if "Total" in df.index:
+                    merged_data[year] = merged_data.get(year, 0) + df.at["Total", year]
+                for country, value in df[year].items():
+                    if country != "Total":
+                        if year not in country_data:
+                            country_data[year] = {}
+                        country_data[year][country] = country_data[year].get(country, 0) + value
+    combined_df = pd.DataFrame(
+        {"Fiscal Year": list(merged_data.keys()), "Total Trade Value": list(merged_data.values())})
+    combined_df.sort_values("Fiscal Year", inplace=True)
+
+    if country_data:
+        countrywise_df = pd.DataFrame.from_dict(country_data, orient="index").fillna(0)
+        countrywise_df.index.name = "Fiscal Year"
+        countrywise_df.to_csv("combined_countrywise_trade.csv")
+
+    return combined_df, "combined_countrywise_trade.csv" if country_data else None
+
 
 def schedule_file_deletion(file_paths, delay=10):
     def delete_files():
@@ -76,7 +94,10 @@ def schedule_file_deletion(file_paths, delay=10):
         for file_path in file_paths:
             if os.path.exists(file_path):
                 os.remove(file_path)
+                print(f"Deleted file: {file_path}")
+
     threading.Thread(target=delete_files, daemon=True).start()
+
 
 st.text("Processing may take a while depending on the number of HS codes and years selected.")
 
@@ -91,24 +112,43 @@ if st.button("Fetch Trade Data"):
                 all_data_paths.append(data_path)
             progress_bar.progress(int(((i + 1) / len(hs_code_selection)) * 100))
 
-        combined_df = merge_hs_code_data(hs_code_selection, trade_type)
+        if len(hs_code_selection) == 1:
+            single_hs_code = hs_code_selection[0]
+            file_path = f"{single_hs_code}_{trade_type}.csv"
+            if os.path.exists(file_path):
+                df = pd.read_csv(file_path, index_col=0)
+                if "Total" in df.index:
+                    total_data = df.loc["Total"].reset_index()
+                    total_data.columns = ["Fiscal Year", "Total Trade Value"]
+                    st.subheader(f"Trend in {trade_type}s for HS Code {single_hs_code} during the period {start_fiscal_year} to {end_fiscal_year}")
+                    fig = px.line(total_data, x="Fiscal Year", y="Total Trade Value (US$ Million)", markers=True)
+                    fig.update_layout(xaxis_title="Fiscal Year", yaxis_title="Total Trade Value (US$ Million)")
+                    st.plotly_chart(fig, use_container_width=True)
+                    csv_buffer = io.BytesIO()
+                    total_data.to_csv(csv_buffer, index=False)
+                    st.download_button(label="Download country-wise data", data=csv_buffer.getvalue(),
+                                       file_name=f"{single_hs_code}_{trade_type}.csv", mime="text/csv")
+                    st.text("All figures are in US$ Million.")
+                    schedule_file_deletion([file_path])
+        elif len(hs_code_selection) > 1:
+            combined_df, countrywise_csv_path = merge_hs_code_data(hs_code_selection, trade_type)
+            if combined_df is not None:
+                st.subheader(f"Trend in {trade_type}s for HS Codes {hs_numbers} during the period {start_fiscal_year} to {end_fiscal_year}")
+                fig = px.line(combined_df, x="Fiscal Year", y="Total Trade Value", markers=True)
+                fig.update_layout(xaxis_title="Fiscal Year", yaxis_title="Total Trade Value (US$ Million)")
+                st.plotly_chart(fig, use_container_width=True)
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+                    for path in all_data_paths:
+                        zip_file.write(path, os.path.basename(path))
+                    if countrywise_csv_path:
+                        zip_file.write(countrywise_csv_path, os.path.basename(countrywise_csv_path))
+                zip_buffer.seek(0)
+                st.download_button(label="Download country-wise data for each of the selected HS code", data=zip_buffer,
+                                   file_name=f"trade_data_{trade_type}.zip", mime="application/zip")
 
-        if not combined_df.empty:
-            st.subheader(f"Trend in {trade_type}s for HS Codes {hs_numbers} during the period {start_fiscal_year} to {end_fiscal_year}")
-            fig = px.line(combined_df, x="Fiscal Year", y="Trade Value", markers=True)
-            fig.update_layout(xaxis_title="Fiscal Year", yaxis_title="Total Trade Value (US$ Million)")
-            st.plotly_chart(fig, use_container_width=True)
-
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-                for path in all_data_paths:
-                    zip_file.write(path, os.path.basename(path))
-            zip_buffer.seek(0)
-
-            st.download_button(label="Download data", data=zip_buffer,
-                               file_name=f"trade_data_{trade_type}.zip", mime="application/zip")
-            schedule_file_deletion(all_data_paths)
-        
+                st.text("All figures are in US$ Million.")
+                schedule_file_deletion(all_data_paths + ([countrywise_csv_path] if countrywise_csv_path else []))
         st.success("Scraping complete!")
     else:
         st.error("Please select at least one HS Code before fetching data.")
